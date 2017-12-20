@@ -106,7 +106,7 @@ party_affiliation_def = {
      ['definition', 'text', None] ], 
     "data": [
     ['AIP', 'American\'s Party of Florida'],
-    ['CFP', 'American\'s Party of Florida'],
+    ['CFP', 'Constitution Party of Florida'],
     ['DEM', 'Florida Democratic Party'],
     ['ECO', 'Ecology Party of Florida'],
     ['GRE', 'Green Party of Florida'],

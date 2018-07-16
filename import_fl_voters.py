@@ -5,7 +5,7 @@ import json
 import unicodecsv
 import glob
 import sqlite3
-
+import zipfile
 
 class DB():
     def __init__(self, dbFile, newDB=False):
@@ -72,7 +72,8 @@ voter_def = {
     ['day_phone_number', 'text(7)', 'suppressed', 7],
     ['day_phone_ext', 'text(4)', 'suppressed', 4],
     ['email', 'text(100)', 'suppressed', 100],
-    ['extract_date', 'text(10)', 'unknown', 10]], 
+    ['extract_date', 'text(10)', 'unknown', 10]],
+    "zipGlob": '*Registration*.zip', 
     "fileGlob": 'voter/???_2*.txt'
     }
 
@@ -84,6 +85,7 @@ voter_history_def = {
     ['election_date', 'text(10)', None, 10],
     ['election_type', 'text(10)', None, 10],
     ['history_code', 'text(1)', None, 1]], 
+    "zipGlob": '*History*.zip', 
     "fileGlob": 'history/???_H_2*txt'
     }
 
@@ -232,7 +234,7 @@ lu_tables = [county_code_def, voter_status_def, gender_def, race_def, party_affi
 data_tables = [voter_def, voter_history_def]
 
 def build_table(db, data):
-    cmd = "CREATE TABLE {tbl} (".format(tbl=data["table"])
+    cmd = "CREATE TABLE IF NOT EXISTS {tbl} (".format(tbl=data["table"])
     sep = ""
     for fld in data["fields"]:
         cmd += sep + fld[0] + " " + fld[1]
@@ -240,6 +242,17 @@ def build_table(db, data):
     cmd += ");"
 
     cur = db.cursor()
+    cur.execute(cmd)
+    cur.fetchone()
+    db.commit()
+
+def init_gpkg(db):
+    cmd = "SELECT load_extension('mod_spatialite.so');"
+    cur = db.cursor()
+    cur.execute(cmd)
+    cur.fetchone()
+
+    cmd = "SELECT gpkgCreateBaseTables();"
     cur.execute(cmd)
     cur.fetchone()
     db.commit()
@@ -260,7 +273,7 @@ def load_table(db, data):
 def parse_dataline(data,  line):
     row = []
     if 1 == 1 :
-        row = line.split("\t")
+        row = line.decode('utf-8').split("\t")
         for p in range(0, len(data["fields"])-len(row)):
             row.append("")
     else:
@@ -272,23 +285,32 @@ def parse_dataline(data,  line):
             row.append(r)
     return row
 
-def load_data_table(db, data):
+def load_data_table(db, data, dvdLbl):
     cur = db.cursor()
-    for f in glob.glob(data["fileGlob"]):
-        fp = open(f, 'rt')
-        ck = []
-        for l in fp:
-            lp = parse_dataline(data, l)
-            ck.append (lp)
-            if len(ck) >= 100000:
+
+    # read directly from the ZIP File
+    for z in glob.glob(('dvd/%s/'+ data['zipGlob'])%(dvdLbl)):
+        zip_ref = zipfile.ZipFile(z, 'r')
+        
+        #for f in glob.glob(data["fileGlob"]):
+        # only grab TXT files from the archive
+        zF = [z.filename for z in zip_ref.infolist() if z.filename[-4:] == '.txt']
+        for f in zF:
+            fp = zip_ref.open(f, 'r')
+            ck = []
+            for l in fp:
+                # this step adds missing fields and converts from bytes to string
+                lp = parse_dataline(data, l)
+                ck.append (lp)
+                if len(ck) >= 100000:
+                    load_data_chunk(cur, data, ck)
+                    print(".", end='')
+                    ck = []
+            if len(ck) > 0:
                 load_data_chunk(cur, data, ck)
                 print(".", end='')
-                ck = []
-        if len(ck) > 0:
-            load_data_chunk(cur, data, ck)
-            print(".", end='')
-        fp.close()
-        print(': ' + f)
+            fp.close()
+            print(': ' + f)
 
 def load_data_chunk(cur, data, chunk):
     cmd = "INSERT INTO {tbl} VALUES (".format(tbl=data["table"])
@@ -302,7 +324,16 @@ def load_data_chunk(cur, data, chunk):
     cur.fetchone()
 
 def main(args):
-    db = DB('fl_voters.gpkg')
+    dbF = 'fl_voters.gpkg'
+    if os.path.exists(dbF):
+        os.remove(dbF)
+
+    if len(args[0]) > 0:
+        dvdLbl = args[0]
+    else
+        dvdLbl = 'Jul_10_2018'
+
+    db = DB(dbF)
     for d in lu_tables:
         build_table(db, d)
         load_table(db, d)
@@ -310,7 +341,7 @@ def main(args):
 
     for d in data_tables:
         build_table(db, d)
-        load_data_table(db, d)
+        load_data_table(db, d, dvdLbl)
         db.commit()
 
     db.close()

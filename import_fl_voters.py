@@ -330,7 +330,7 @@ def main(args):
 
     if len(args[0]) > 0:
         dvdLbl = args[0]
-    else
+    else:
         dvdLbl = 'Jul_10_2018'
 
     db = DB(dbF)
@@ -347,5 +347,7 @@ def main(args):
     db.close()
 
 if "__main__" == __name__:
+    assert sys.version.startswith('3.'), "Must run with python 3.6 or later"
+
     main(sys.argv[1:])
     print ("All Done")

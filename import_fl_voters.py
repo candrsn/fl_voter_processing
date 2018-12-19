@@ -1,4 +1,5 @@
 
+from __future__ import print_function
 import sys
 import os
 import json
@@ -6,6 +7,9 @@ import unicodecsv
 import glob
 import sqlite3
 import zipfile
+from datetime import datetime
+
+PY3 = sys.version.startswith('3.')
 
 class DB():
     def __init__(self, dbFile, newDB=False):
@@ -230,6 +234,21 @@ county_code_def = {
     ["WAS","Washington"]]
     }
 
+months = {
+    'Dec': 12,
+    'Nov': 11,
+    'Oct': 10,
+    'Sep': 9,
+    'Aug': 8,
+    'Jul': 7,
+    'Jun': 6,
+    'May': 5,
+    'Apr': 4,
+    'Mar': 3,
+    'Feb': 2,
+    'Jan': 1
+    }
+
 lu_tables = [county_code_def, voter_status_def, gender_def, race_def, party_affiliation_def, history_codes_def]
 data_tables = [voter_def, voter_history_def]
 
@@ -300,7 +319,8 @@ def load_data_table(db, data, dvdLbl):
             ck = []
             for l in fp:
                 # this step adds missing fields and converts from bytes to string
-                lp = parse_dataline(data, l)
+                # also strip spaces and x10, x13 from the line
+                lp = parse_dataline(data, l.strip())
                 ck.append (lp)
                 if len(ck) >= 100000:
                     load_data_chunk(cur, data, ck)
@@ -324,15 +344,18 @@ def load_data_chunk(cur, data, chunk):
     cur.fetchone()
 
 def main(args):
-    dbF = 'fl_voters.gpkg'
-    if os.path.exists(dbF):
-        os.remove(dbF)
-
     if len(args[0]) > 0:
         dvdLbl = args[0]
     else:
         dvdLbl = 'Jul_10_2018'
 
+    dbDate = dvdLbl.split('_')
+    dbDate[0] = months[dbDate[0]]
+    dbDate = datetime(int(dbDate[2]), int(dbDate[0]), int(dbDate[1])).date().strftime('%Y%m%d')
+    dbF = 'fl_voters_{dt}.gpkg'.format(dt=dbDate)
+    if os.path.exists(dbF):
+        os.remove(dbF)
+    
     db = DB(dbF)
     for d in lu_tables:
         build_table(db, d)
@@ -344,10 +367,14 @@ def main(args):
         load_data_table(db, d, dvdLbl)
         db.commit()
 
+    c = db.cursor()
+    c.execute('''CREATE INDEX voter_history__voter_id__ind on voter_history(voter_id)''')
+    c.fetchone()
+
+    db.commit()
     db.close()
 
 if "__main__" == __name__:
-    assert sys.version.startswith('3.'), "Must run with python 3.6 or later"
 
     main(sys.argv[1:])
     print ("All Done")

@@ -304,6 +304,9 @@ def parse_dataline(data,  line):
             row.append(r)
     return row
 
+def check_dvd(dvdLbl):
+    assert len(('dvd/%s/*')%(dvdLbl)) > 1, "The DVD {} is empty or not understood".format(dvdLbl)
+
 def load_data_table(db, data, dvdLbl):
     cur = db.cursor()
 
@@ -344,10 +347,10 @@ def load_data_chunk(cur, data, chunk):
     cur.fetchone()
 
 def main(args):
-    if len(args[0]) > 0:
+    if len(args) > 0:
         dvdLbl = args[0]
     else:
-        dvdLbl = 'Jul_10_2018'
+        dvdLbl = 'May_07_2019'
 
     dbDate = dvdLbl.split('_')
     dbDate[0] = months[dbDate[0]]

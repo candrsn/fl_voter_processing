@@ -8,6 +8,7 @@ import glob
 import sqlite3
 import zipfile
 from datetime import datetime
+import logging
 
 PY3 = sys.version.startswith('3.')
 
@@ -312,6 +313,7 @@ def load_data_table(db, data, dvdLbl):
 
     # read directly from the ZIP File
     for z in glob.glob(('dvd/%s/'+ data['zipGlob'])%(dvdLbl)):
+        logging.info("attempting to read tables from {s}".format(s=z))
         zip_ref = zipfile.ZipFile(z, 'r')
         
         #for f in glob.glob(data["fileGlob"]):
@@ -347,10 +349,10 @@ def load_data_chunk(cur, data, chunk):
     cur.fetchone()
 
 def main(args):
-    if len(args) > 0:
+    if len(args) > 0 and len(args[0]) > 0:
         dvdLbl = args[0]
     else:
-        dvdLbl = 'May_07_2019'
+        dvdLbl = 'Oct_14_2020'
 
     dbDate = dvdLbl.split('_')
     dbDate[0] = months[dbDate[0]]

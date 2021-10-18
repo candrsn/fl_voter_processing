@@ -19,7 +19,7 @@ usage() {
 }
 
 copy_dvd() {
-    sudo ls .
+    #sudo ls .
     devx="`ls -l /dev/disk/by-label | grep '/sr0' | awk '/./ { print $9; }'`"
     x=`udisksctl mount -b /dev/sr0`
     sleep 1
@@ -36,7 +36,7 @@ copy_dvd() {
     chmod -R a+r dvd/$k
     chmod a+x dvd/$k
 
-    return "$k"
+    echo "$k"
 }
 
 merge_extract() {
@@ -261,7 +261,7 @@ main_reimport() {
 
 main_run() {
 
-if [ "$1" == "import" ]; then
+if [ "$1" == "--import" ]; then
     dt=`copy_dvd`
     shift
 else

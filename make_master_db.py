@@ -67,8 +67,23 @@ def connect_month(cur, dbname):
     assert cur.fetchall() is not None, "failed to connect to monthly database"
 
 def disconnect_month(cur):
-    cmd = "DETACH DATABASE fl;"
-    cur.execute(cmd)
+    assert cur.fetchall() is not None, "problem waiting for cursor to complete a prior statement"
+    cmd = "DETACH DATABASE 'fl';"
+    cnt = 3
+    idx = 0
+    while idx < cnt:
+        try:
+            cur.execute(cmd)
+            assert cur.fetchall() is not None, "problem detaching the monthly database"
+
+            # if we get here no need to try again
+            idx = cnt
+        except sqlite3.OperationalError:
+            logging.warning("failed to DETACH monthly database")
+            if idx == cnt:
+                raise sqlite3.OperationalError
+            idx += 1
+            time.sleep(60)
 
     assert cur.fetchall() is not None, "failed to disconnect from monthly database"
 
@@ -102,9 +117,10 @@ def populate_master(cur, srcfile):
     logging.info(f"building knowledge from {srcfile}")
 
     # check for reloads
-    cmd = f"SELECT action, info from vl.voter_action_log WHERE action = 'MERGE' and info = '{srcfile}'"
+    cmd = f"SELECT action, info from vl.voter_action_log WHERE action = 'MERGE' and info = '{srcfile}';"
+    cur.execute(cmd)
     res = cur.fetchall()
-    if len(res) > 0 and len(res[0]) > 0 and res[0][1] == 'srcfile':
+    if len(res) > 0 and len(res[0]) > 0:
         logging.warning(f"{srcfile} has already been loaded, skipping it")
         # skip this file as it is already loaded
         return
@@ -114,14 +130,26 @@ def populate_master(cur, srcfile):
 
     build_unique_indexes(cur)
 
-    main_dml = ["""
+    main_dml = ["""CREATE TEMP TABLE new_voters AS SELECT * 
+        FROM fl.voter nv
+        WHERE NOT EXISTS (SELECT 1 FROM vp.voter_person p WHERE nv.voter_id = p.voter_id);
+    ""","""CREATE TEMP TABLE exist_voters AS SELECT * 
+        FROM fl.voter nv
+        WHERE EXISTS (SELECT 1 FROM vp.voter_person p WHERE nv.voter_id = p.voter_id);
+    ""","""
+    -- only update the times when everything matches
     INSERT INTO vp.voter_person (voter_id, name_last, name_suffix, name_first, name_middle, gender, race, birth_date, registration_date,
     party_affiliation, day_phone_area_code, day_phone_number, day_phone_ext, voter_status, first_instance, last_instance)
     SELECT voter_id, name_last, name_suffix, name_first, name_middle, gender, race, birth_date, registration_date,
     party_affiliation, day_phone_area_code, day_phone_number, day_phone_ext, voter_status, extract_date, extract_date
-         -- fake where clause
-         FROM fl.voter nv
-         WHERE EXISTS (SELECT 1 FROM vp.voter_person ev WHERE ev.voter_id = nv.voter_id) 
+         -- fake where clause may be needed
+         FROM temp.exist_voters nv
+         WHERE EXISTS (SELECT 1 FROM vp.voter_person ev WHERE ev.voter_id = nv.voter_id and 
+             ev.name_first = nv.name_first and
+             ev.name_last = nv.name_last and
+             ev.birth_date = nv.birth_date and
+             (nv.extract_date < ev.first_instance or
+              nv.extract_date > ev.last_instance)  ) 
          ON CONFLICT (voter_id, name_first, name_last, birth_date)
          DO UPDATE
                 SET 
@@ -139,19 +167,42 @@ def populate_master(cur, srcfile):
                             END
         ;
     ""","""
+    -- add data for existing voters with new info
     INSERT INTO vp.voter_person (voter_id, name_last, name_suffix, name_first, name_middle, gender, race, birth_date, registration_date,
     party_affiliation, day_phone_area_code, day_phone_number, day_phone_ext, voter_status, first_instance, last_instance)
     SELECT voter_id, name_last, name_suffix, name_first, name_middle, gender, race, birth_date, registration_date,
     party_affiliation, day_phone_area_code, day_phone_number, day_phone_ext, voter_status, extract_date, extract_date
-         -- fake where clause
-         FROM fl.voter nv
-         WHERE NOT EXISTS (SELECT 1 FROM vp.voter_person ev WHERE ev.voter_id = nv.voter_id) 
+         -- fake where clause may be needed
+         FROM temp.exist_voters nv
+         WHERE NOT EXISTS (SELECT 1 FROM vp.voter_person ev WHERE ev.voter_id = nv.voter_id and 
+             ev.name_first = nv.name_first and
+             ev.name_last = nv.name_last and
+             ev.birth_date = nv.birth_date and
+             nv.extract_date >= ev.first_instance and
+             nv.extract_date <= ev.last_instance)
         ;
     ""","""
+    -- add voters who are new
+    INSERT INTO vp.voter_person (voter_id, name_last, name_suffix, name_first, name_middle, gender, race, birth_date, registration_date,
+    party_affiliation, day_phone_area_code, day_phone_number, day_phone_ext, voter_status, first_instance, last_instance)
+    SELECT voter_id, name_last, name_suffix, name_first, name_middle, gender, race, birth_date, registration_date,
+    party_affiliation, day_phone_area_code, day_phone_number, day_phone_ext, voter_status, extract_date, extract_date
+         -- fake where clause may be needed
+         FROM temp.new_voters nv
+        ;
+    ""","""
+    -- only update data with new timestamps
     INSERT INTO va.voter_address (voter_id, address_type, address1, address2, city, state, zipcode, first_instance, last_instance)
     SELECT voter_id, 'RES', res_address1, res_address2, res_city, res_state, res_zipcode, extract_date, extract_date
-        FROM fl.voter nv
-        WHERE EXISTS (SELECT 1 FROM va.voter_address ev WHERE ev.voter_id = nv.voter_id) 
+        FROM temp.exist_voters nv
+        WHERE EXISTS (SELECT 1 FROM va.voter_address ev WHERE ev.voter_id = nv.voter_id and
+            ev.address1 = nv.res_address1 and
+            ev.address2 = nv.res_address2 and
+            ev.city = nv.res_city and
+            ev.state = nv.res_state and
+            ev.zipcode = nv.res_zipcode and
+             (nv.extract_date < ev.first_instance or
+              nv.extract_date > ev.last_instance)  ) 
         ON CONFLICT (voter_id, address1, address2, city, state, zipcode) 
             DO UPDATE
                 SET 
@@ -169,16 +220,31 @@ def populate_master(cur, srcfile):
                             END
         ;
     ""","""
+    -- add voters who are new
     INSERT INTO va.voter_address (voter_id, address_type, address1, address2, city, state, zipcode, first_instance, last_instance)
     SELECT voter_id, 'RES', res_address1, res_address2, res_city, res_state, res_zipcode, extract_date, extract_date
-        FROM fl.voter nv
-        WHERE NOT EXISTS (SELECT 1 FROM va.voter_address ev WHERE ev.voter_id = nv.voter_id) 
+        FROM temp.exist_voters nv
+        WHERE NOT EXISTS (SELECT 1 FROM va.voter_address ev WHERE ev.voter_id = nv.voter_id and
+             ev.address1 = nv.res_address1 and
+            ev.address2 = nv.res_address2 and
+            ev.city = nv.res_city and
+            ev.state = nv.res_state and
+             nv.extract_date >= ev.first_instance and
+             nv.extract_date <= ev.last_instance)
         ;
     ""","""
+    -- only update data with new timestamps
     INSERT INTO va.voter_address (voter_id, address_type, address1, address2, city, state, zipcode, first_instance, last_instance)
     SELECT voter_id, 'RES', mail_address1, mail_address2, mail_city, mail_state, mail_zipcode, extract_date, extract_date
-        FROM fl.voter nv
-        WHERE EXISTS (SELECT 1 FROM va.voter_address ev WHERE ev.voter_id = nv.voter_id) 
+        FROM temp.exist_voters nv
+        WHERE EXISTS (SELECT 1 FROM va.voter_address ev WHERE ev.voter_id = nv.voter_id and
+            ev.address1 = nv.mail_address1 and
+            ev.address2 = nv.mail_address2 and
+            ev.city = nv.mail_city and
+            ev.state = nv.mail_state and
+            ev.zipcode = nv.mail_zipcode and
+             (nv.extract_date < ev.first_instance or
+              nv.extract_date > ev.last_instance)  ) 
         ON CONFLICT (voter_id, address1, address2, city, state, zipcode) 
             DO UPDATE
                 SET 
@@ -196,16 +262,30 @@ def populate_master(cur, srcfile):
                             END
         ;
     ""","""
+    -- add voters who are new
     INSERT INTO va.voter_address (voter_id, address_type, address1, address2, city, state, zipcode, first_instance, last_instance)
     SELECT voter_id, 'MAIL', mail_address1, mail_address2, mail_city, mail_state, mail_zipcode, extract_date, extract_date
-        FROM fl.voter nv
+        FROM temp.new_voters nv
         WHERE NOT EXISTS (SELECT 1 FROM va.voter_address ev WHERE ev.voter_id = nv.voter_id) 
         ;
     ""","""
+    -- add voters who are new
+    INSERT INTO va.voter_address (voter_id, address_type, address1, address2, city, state, zipcode, first_instance, last_instance)
+    SELECT voter_id, 'MAIL', mail_address1, mail_address2, mail_city, mail_state, mail_zipcode, extract_date, extract_date
+        FROM temp.new_voters nv
+        WHERE NOT EXISTS (SELECT 1 FROM va.voter_address ev WHERE ev.voter_id = nv.voter_id) 
+        ;
+    ""","""
+    -- only update data with new timestamps
     INSERT INTO vd.voter_districts (voter_id, precinct, precinct_group, precinct_split, first_instance, last_instance)
     SELECT voter_id, precinct, precinct_group, precinct_split, extract_date, extract_date
-        FROM fl.voter nv
-        WHERE EXISTS (SELECT 1 FROM vd.voter_districts ev WHERE ev.voter_id = nv.voter_id)  
+        FROM temp.exist_voters nv
+        WHERE EXISTS (SELECT 1 FROM vd.voter_districts ev WHERE ev.voter_id = nv.voter_id and
+            ev.precinct = nv.precinct and
+            ev.precinct_group = nv.precinct_group and
+            ev.precinct_split = nv.precinct_split and
+             (nv.extract_date < ev.first_instance or
+              nv.extract_date > ev.last_instance)  )  
         ON CONFLICT (voter_id, precinct, precinct_group, precinct_split) 
             DO UPDATE
                 SET 
@@ -223,17 +303,30 @@ def populate_master(cur, srcfile):
                             END
         ;
     ""","""
+    -- add voters who have new info
     INSERT INTO vd.voter_districts (voter_id, precinct, precinct_group, precinct_split, first_instance, last_instance)
     SELECT voter_id, precinct, precinct_group, precinct_split, extract_date, extract_date
-        FROM fl.voter nv
+        FROM temp.exist_voters nv
+        WHERE NOT EXISTS (SELECT 1 FROM vd.voter_districts ev WHERE ev.voter_id = nv.voter_id and
+            ev.precinct = nv.precinct and
+            ev.precinct_group = nv.precinct_group and
+            ev.precinct_split = nv.precinct_split and
+            nv.extract_date >= ev.first_instance and
+            nv.extract_date <= ev.last_instance )    
+        ;
+    ""","""
+    -- add voters who are new
+    INSERT INTO vd.voter_districts (voter_id, precinct, precinct_group, precinct_split, first_instance, last_instance)
+    SELECT voter_id, precinct, precinct_group, precinct_split, extract_date, extract_date
+        FROM temp.new_voters nv
         WHERE NOT EXISTS (SELECT 1 FROM vd.voter_districts ev WHERE ev.voter_id = nv.voter_id)  
         ;
     """,f"""
     INSERT INTO vl.voter_action_log (action_date, action, info)
-        VALUES (CURRENT_TIMESTAMP, 'MERGE', {srcfile});
+        VALUES (CURRENT_TIMESTAMP, 'MERGE', '{srcfile}');
     """,f"""
     INSERT INTO vl.voter_stats (action_date, extract_file, voters, voter_status)
-        SELECT CURRENT_TIMESTAMP, '{srcfile}', count(*), voter_status from fl.voters;
+        SELECT CURRENT_TIMESTAMP, '{srcfile}', count(*), voter_status from fl.voter;
     """]
     itr = 0
     for cmd in main_dml:
@@ -245,114 +338,7 @@ def populate_master(cur, srcfile):
             raise sqlite3.OperationalError
         logging.info(f"statement {itr} took {(time.time() - st):.2f} seconds")
         itr += 1
-    assert cur.fetchall() is not None, "failed to apply monthy file"
-
-def populate_master_tuned(cur, srcfile):
-
-    # check for reloads
-    cmd = f"SELECT action, info from vl.voter_action_log WHERE action = 'MERGE' and info = '{srcfile}'"
-    res = cur.fetchall()
-    if len(res) > 0 and len(res[0]) > 0 and res[0][1] == 'srcfile':
-        # skip this file as it is already loaded
-        return
-
-    cmd = "PRAGMA SYNCHRONOUS=off;"
-    cur.execute(cmd)
-
-    unique_rules = """
-    CREATE UNIQUE INDEX IF NOT EXISTS vp.voter_person_unq__ind ON voter_person(voter_id, name_first, name_last, birth_date);
-    CREATE UNIQUE INDEX IF NOT EXISTS va.voter_address_unq__ind ON voter_address(voter_id, address1, address2, city, state, zipcode);
-    CREATE UNIQUE INDEX IF NOT EXISTS vd.voter_districts_unq__ind ON voter_districts(voter_id, precinct, precinct_group, precinct_split);
-
-    """
-    cur.executescript(unique_rules)
-
-    main_dml = ["""
-    INSERT INTO vp.voter_person (voter_id, name_last, name_suffix, name_first, name_middle, gender, race, birth_date, registration_date,
-    party_affiliation, day_phone_area_code, day_phone_number, day_phone_ext, voter_status, first_instance, last_instance)
-    SELECT voter_id, name_last, name_suffix, name_first, name_middle, gender, race, birth_date, registration_date,
-    party_affiliation, day_phone_area_code, day_phone_number, day_phone_ext, voter_status, extract_date, extract_date
-         -- fake where clause
-         FROM fl.voter as f
-         WHERE NOT EXISTS (SELECT 1 FROM voter_person as p
-                WHERE p.voter_id = f.voter_id and
-                  p.name_first = f.name_first and
-                  p.name_last = f.name_last and
-                  p.birth_date = f.birth_date)
-         ON CONFLICT (voter_id, name_first, name_last, birth_date)
-         DO UPDATE
-                SET 
-                    first_instance = 
-                        CASE 
-                            WHEN excluded.first_instance < first_instance 
-                            THEN first_instance = excluded.first_instance
-                            ELSE first_instance
-                            END,
-                    last_instance = 
-                        CASE 
-                            WHEN excluded.last_instance > last_instance 
-                            THEN last_instance = excluded.last_instance
-                            ELSE last_instance
-                            END
-                    ;
-    ""","""
-    INSERT INTO va.voter_address (voter_id, address_type, address1, address2, city, state, zipcode, first_instance, last_instance)
-    SELECT voter_id, address_type, address1, address2, city, state, zipcode, extract_date, extract_date)
-        FROM fl.voter WHERE 1 = 1 
-        ON CONFLICT (voter_id, address1, address2, city, state, zipcode, extract_date, extract_date) 
-            DO UPDATE
-                SET 
-                    first_instance = 
-                        CASE 
-                            WHEN excluded.first_instance < first_instance 
-                            THEN first_instance = excluded.first_instance
-                            ELSE first_instance
-                            END,
-                    last_instance = 
-                        CASE 
-                            WHEN excluded.last_instance > last_instance 
-                            THEN last_instance = excluded.last_instance
-                            ELSE last_instance
-                            END
-                    ;
-    ""","""
-    INSERT INTO va.voter_districts (voter_id, precinct, precinct_group, precinct_split, first_instance, last_instance)
-    SELECT voter_id, precinct, precinct_group, precinct_split, extract_date, extract_date)
-        FROM fl.voter WHERE 1 = 1 
-        ON CONFLICT (voter_id, precinct, precinct_group, precinct_split) 
-            DO UPDATE
-                SET 
-                    first_instance = 
-                        CASE 
-                            WHEN excluded.first_instance < first_instance 
-                            THEN first_instance = excluded.first_instance
-                            ELSE first_instance
-                            END,
-                    last_instance = 
-                        CASE 
-                            WHEN excluded.last_instance > last_instance 
-                            THEN last_instance = excluded.last_instance
-                            ELSE last_instance
-                            END
-                    ;
-
-    """,f"""
-    INSERT INTO vl.voter_action_log (action_date, action, info)
-        VALUES (CURRENT_TIMESTAMP, 'MERGE', {srcfile});
-    """,f"""
-    INSERT INTO vl.voter_stats (action_date, extract_file, voters, voter_status)
-        SELECT CURRENT_TIMESTAMP, '{srcfile}', count(*), voter_status from fl.voters;
-    """]
-    itr = 0
-    for cmd in main_dml:
-        st = time.time()
-        try:
-            cur.executescript(cmd)
-        except (sqlite3.OperationalError):
-            logging.error(f"SQL error with {cmd}")
-            raise sqlite3.OperationalError
-        logging.info(f"statement {itr} took {time.time() - st} seconds")
-        itr += 1
+    logging.info(f"completed merge of {srcfile}")
     assert cur.fetchall() is not None, "failed to apply monthy file"
 
 def mount_zipfile(zfilename, mntlocation):
@@ -361,21 +347,32 @@ def mount_zipfile(zfilename, mntlocation):
 def umount_zipfile(mntlocation):
     subprocess.call(["fusermount", "-u", mntlocation])
 
+def db_connect(dbfile=":memory:", dbpath="data/db/"):
+    db = sqlite3.connect("tmpx/work.db", timeout=30)
+    cur = db.cursor()
+    cur.execute("PRAGMA SYNCHRONOUS=OFF;")
+    connect_dbs(cur, dbpath)
+    master_tables_ddl(cur)
+    db.commit()
+    return db, cur
 
 def main(args=[]):
     dbpath="data/db/"
     dbpath="tmpx/"
-    db = sqlite3.connect(":memory:")
-    cur = db.cursor()
-    connect_dbs(cur, dbpath)
-    master_tables_ddl(cur)
-    db.commit()
+    dbfile="tmpx/work.db"
 
     for monthlyfile in glob.glob(f"{dbpath}import_*.db"):
+        db,cur = db_connect(dbfile=dbfile, dbpath=dbpath)
+
         connect_month(cur, monthlyfile)
         populate_master(cur, os.path.basename(monthlyfile))
-        disconnect_month(cur)
         db.commit()
+        os.sync()
+        disconnect_month(cur)
+        db.close()
+        time.sleep(30)
+
+    logging.info("Completed processing")
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)

@@ -25,7 +25,12 @@ copy_dvd() {
     sleep 1
     j=`printf $devx`
     j=`df -h -t udf -l --output=target | tail -n 1`
+
+    # pull the date from the DVD label
     k=`basename "$j" | sed -e 's/ /_/g'`
+
+    # pull the date from the create date of the DVD ISO
+    k=`date -r "$j"/. "+%b_%d_%Y"`
 
     echo "copy from $j to $k"
     if [ -r "$j" ]; then
@@ -177,7 +182,7 @@ import_history() {
 	"
 
     # transform the tab separated data into INSERTS	
-    unzip -p $zF | awk  -v Commit=5001  -f history_update.awk 
+    unzip -p "$zF" | awk  -v Commit=5001  -f history_update.awk 
     
     ) | sqlite3 $iDB
 
@@ -195,7 +200,7 @@ CREATE TABLE IF NOT EXISTS voter (county_code text(3), voter_id text(10), name_l
     "
 
     # transform the tab separated data into INSERTS	
-    unzip -p $zR | awk -v eDate="$j" -v Commit=5001 -f voter_update.awk
+    unzip -p "$zR" | awk -v eDate="$j" -v Commit=5001 -f voter_update.awk
     
     ) | sqlite3 $iDB
 
